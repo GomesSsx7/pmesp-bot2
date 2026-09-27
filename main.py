@@ -12,8 +12,11 @@ from discord.ui import View, Button
 # Configuração do Fuso Horário do Brasil
 TZ_BR = ZoneInfo("America/Sao_Paulo")
 
-def obter_agora_str():
-    return datetime.now(TZ_BR).strftime("%H:%M:%S")
+def obter_agora_dt():
+    return datetime.now(TZ_BR)
+
+def obter_agora_hora_str():
+    return datetime.now(TZ_BR).strftime("%H:%M")
 
 def obter_agora_full_str():
     return datetime.now(TZ_BR).strftime("%Y-%m-%d %H:%M:%S")
@@ -46,6 +49,8 @@ DB_PATH = os.path.join(os.path.dirname(__file__), "ponto.db")
 def setup_db():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
+    
+    # Tabela principal com suporte a ID da mensagem do Log e canal
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS registro_ponto (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -53,16 +58,28 @@ def setup_db():
             inicio TEXT,
             fim TEXT,
             status TEXT,
-            duracao_segundos INTEGER
+            duracao_segundos INTEGER,
+            log_msg_id INTEGER,
+            log_channel_id INTEGER
+        )
+    """)
+    
+    # Tabela para salvar o canal padrão de logs
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS config_servidor (
+            guild_id INTEGER PRIMARY KEY,
+            log_channel_id INTEGER
         )
     """)
     conn.commit()
 
-    try:
-        cursor.execute("ALTER TABLE registro_ponto ADD COLUMN duracao_segundos INTEGER")
-        conn.commit()
-    except sqlite3.OperationalError:
-        pass
+    # Migrações preventivas
+    for col in ["duracao_segundos INTEGER", "log_msg_id INTEGER", "log_channel_id INTEGER"]:
+        try:
+            cursor.execute(f"ALTER TABLE registro_ponto ADD COLUMN {col}")
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass
 
     conn.close()
 
@@ -80,79 +97,161 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 tarefas_fechamento = {}
 
 # =============================================================
-# 4. FUNÇÕES DE REGISTRO DE PONTO
+# 4. FUNÇÕES AUXILIARES DE LOG
 # =============================================================
-def iniciar_ou_despausar_ponto(user_id):
+def obter_canal_log(guild_id):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT log_channel_id FROM config_servidor WHERE guild_id = ?", (guild_id,))
+    res = cursor.fetchone()
+    conn.close()
+    return res[0] if res else None
+
+def salvar_canal_log(guild_id, channel_id):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO config_servidor (guild_id, log_channel_id)
+        VALUES (?, ?)
+        ON CONFLICT(guild_id) DO UPDATE SET log_channel_id = excluded.log_channel_id
+    """, (guild_id, channel_id))
+    conn.commit()
+    conn.close()
+
+def formatar_tempo(duracao_segundos):
+    horas, resto = divmod(duracao_segundos, 3600)
+    minutos, _ = divmod(resto, 60)
+    return f"{horas:02d}:{minutos:02d}"
+
+def gerar_texto_log(member_mention, inicio_hora, fim_hora="--:--", total_str="Em andamento...", status="ABERTO"):
+    status_tag = ""
+    if status == "PAUSADO":
+        status_tag = " 🟡 *(Pausado)*"
+    elif status == "FECHADO":
+        status_tag = ""
+
+    return (
+        f"👤 **MEMBRO:** {member_mention}\n"
+        f"➕ **INÍCIO:** {inicio_hora}\n"
+        f"⤓ **TÉRMINO:** {fim_hora}\n"
+        f"⏱️ **TOTAL:** {total_str}{status_tag}"
+    )
+
+# =============================================================
+# 5. LÓGICA DE REGISTRO DO PONTO
+# =============================================================
+async def processar_iniciar(interaction: discord.Interaction):
+    user_id = interaction.user.id
+    guild_id = interaction.guild.id
+    
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("SELECT id, status FROM registro_ponto WHERE user_id = ? AND status IN ('ABERTO', 'PAUSADO')", (user_id,))
     ponto = cursor.fetchone()
     
-    agora_hora = obter_agora_str()
     if ponto:
-        if ponto[1] == 'PAUSADO':
-            cursor.execute("UPDATE registro_ponto SET status = 'ABERTO' WHERE id = ?", (ponto[0],))
-            conn.commit()
-            conn.close()
-            return True, f"🟢 **Ponto retomado** às **{agora_hora}**.", "REMANEJADO"
         conn.close()
-        return False, "Você já possui um ponto aberto!", "ABERTO"
+        return False, "Você já possui um ponto em andamento!"
     
+    log_channel_id = obter_canal_log(guild_id)
+    if not log_channel_id:
+        conn.close()
+        return False, "⚠️ O canal de logs ainda não foi configurado! Use `!set_log_channel #canal`."
+    
+    log_channel = interaction.guild.get_channel(log_channel_id)
+    if not log_channel:
+        conn.close()
+        return False, "⚠️ Canal de logs não encontrado! Reconfigure com `!set_log_channel`."
+
     agora_full = obter_agora_full_str()
-    cursor.execute("INSERT INTO registro_ponto (user_id, inicio, status) VALUES (?, ?, 'ABERTO')", (user_id, agora_full))
+    agora_hora = obter_agora_hora_str()
+    
+    # Envia a mensagem inicial formatada no canal de logs
+    texto_log = gerar_texto_log(interaction.user.mention, agora_hora, "--:--", "Em andamento...", "ABERTO")
+    msg_log = await log_channel.send(texto_log)
+    
+    cursor.execute("""
+        INSERT INTO registro_ponto (user_id, inicio, status, log_msg_id, log_channel_id)
+        VALUES (?, ?, 'ABERTO', ?, ?)
+    """, (user_id, agora_full, msg_log.id, log_channel.id))
     conn.commit()
     conn.close()
-    return True, f"🟢 **Ponto iniciado** às **{agora_hora}**.", "NOVO"
+    
+    return True, f"🟢 **Ponto iniciado!** Registro publicado em {log_channel.mention}."
 
-def pausar_ponto(user_id):
+async def processar_pausar(interaction: discord.Interaction):
+    user_id = interaction.user.id
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute("SELECT id, status FROM registro_ponto WHERE user_id = ? AND status IN ('ABERTO', 'PAUSADO')", (user_id,))
+    cursor.execute("SELECT id, inicio, status, log_msg_id, log_channel_id FROM registro_ponto WHERE user_id = ? AND status IN ('ABERTO', 'PAUSADO')", (user_id,))
     ponto = cursor.fetchone()
     
     if not ponto:
         conn.close()
-        return False, "Você não possui um ponto aberto para pausar.", "SEM_PONTO"
+        return False, "Você não tem um ponto em andamento para pausar/despausar."
+        
+    ponto_id, inicio_str, status_atual, msg_id, channel_id = ponto
+    inicio_dt = datetime.strptime(inicio_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=TZ_BR)
+    inicio_hora = inicio_dt.strftime("%H:%M")
     
-    if ponto[1] == 'PAUSADO':
-        # Se clicar quando já está pausado -> Despausa
-        cursor.execute("UPDATE registro_ponto SET status = 'ABERTO' WHERE id = ?", (ponto[0],))
-        conn.commit()
-        conn.close()
-        agora_hora = obter_agora_str()
-        return True, f"🟢 **Ponto retomado** às **{agora_hora}**.", "DESPAUSADO"
-    else:
-        # Pausa o ponto
-        cursor.execute("UPDATE registro_ponto SET status = 'PAUSADO' WHERE id = ?", (ponto[0],))
-        conn.commit()
-        conn.close()
-        return True, "🟡 **Ponto pausado**.", "PAUSADO"
+    novo_status = "PAUSADO" if status_atual == "ABERTO" else "ABERTO"
+    
+    cursor.execute("UPDATE registro_ponto SET status = ? WHERE id = ?", (novo_status, ponto_id))
+    conn.commit()
+    conn.close()
+    
+    # Atualiza a mensagem no canal de logs
+    try:
+        channel = interaction.guild.get_channel(channel_id)
+        if channel:
+            msg = await channel.fetch_message(msg_id)
+            texto_log = gerar_texto_log(interaction.user.mention, inicio_hora, "--:--", "Em andamento...", novo_status)
+            await msg.edit(content=texto_log)
+    except Exception:
+        pass
+        
+    msg_retorno = "🟡 **Ponto pausado.**" if novo_status == "PAUSADO" else "🟢 **Ponto despausado/retomado.**"
+    return True, msg_retorno
 
-async def finalizar_ponto_usuario(member, motivo="Finalizado pelo usuário"):
+async def processar_finalizar(member, guild, motivo="Finalizado pelo usuário"):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute("SELECT id, inicio FROM registro_ponto WHERE user_id = ? AND status IN ('ABERTO', 'PAUSADO')", (member.id,))
+    cursor.execute("SELECT id, inicio, log_msg_id, log_channel_id FROM registro_ponto WHERE user_id = ? AND status IN ('ABERTO', 'PAUSADO')", (member.id,))
     ponto = cursor.fetchone()
     
     if not ponto:
         conn.close()
         return False, "Nenhum ponto aberto encontrado para finalizar."
-    
-    ponto_id, inicio_str = ponto
+        
+    ponto_id, inicio_str, msg_id, channel_id = ponto
     inicio_dt = datetime.strptime(inicio_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=TZ_BR)
-    agora_dt = datetime.now(TZ_BR)
+    agora_dt = obter_agora_dt()
+    
     duracao_segundos = int((agora_dt - inicio_dt).total_seconds())
+    tempo_fmt = formatar_tempo(duracao_segundos)
     
-    horas, resto = divmod(duracao_segundos, 3600)
-    minutos, segundos = divmod(resto, 60)
-    tempo_formatado = f"{horas}h {minutos}m {segundos}s"
+    inicio_hora = inicio_dt.strftime("%H:%M")
+    fim_hora = agora_dt.strftime("%H:%M")
     
-    cursor.execute("UPDATE registro_ponto SET fim = ?, status = 'FECHADO', duracao_segundos = ? WHERE id = ?", 
-                   (agora_dt.strftime("%Y-%m-%d %H:%M:%S"), duracao_segundos, ponto_id))
+    cursor.execute("""
+        UPDATE registro_ponto 
+        SET fim = ?, status = 'FECHADO', duracao_segundos = ? 
+        WHERE id = ?
+    """, (agora_dt.strftime("%Y-%m-%d %H:%M:%S"), duracao_segundos, ponto_id))
     conn.commit()
     conn.close()
     
-    return True, f"🔴 **Ponto finalizado!** Duração total: **{tempo_formatado}**. ({member.mention})"
+    # Edita a mensagem no canal de logs com o resultado final
+    try:
+        channel = guild.get_channel(channel_id)
+        if channel:
+            msg = await channel.fetch_message(msg_id)
+            texto_log = gerar_texto_log(member.mention, inicio_hora, fim_hora, tempo_fmt, "FECHADO")
+            await msg.edit(content=texto_log)
+    except Exception:
+        pass
+        
+    return True, f"🔴 **Ponto finalizado!** Duração total: **{tempo_fmt}**."
 
 def consultar_horas(user_id):
     conn = sqlite3.connect(DB_PATH)
@@ -161,17 +260,15 @@ def consultar_horas(user_id):
     total = cursor.fetchone()[0] or 0
     conn.close()
     
-    horas, resto = divmod(total, 3600)
-    minutos, _ = divmod(resto, 60)
-    return f"📊 **Seu total de horas acumuladas:** {horas}h {minutos}m."
+    return f"📊 **Total de horas acumuladas:** {formatar_tempo(total)}"
 
-async def agendar_fechamento_automatico(member):
+async def agendar_fechamento_automatico(member, guild):
     try:
-        await asyncio.sleep(180)
-        sucesso, msg = await finalizar_ponto_usuario(member, motivo="Desconexão da call (>3 min)")
+        await asyncio.sleep(180) # 3 minutos de tolerância
+        sucesso, msg = await processar_finalizar(member, guild, motivo="Desconexão da call (>3 min)")
         if sucesso:
             try:
-                await member.send(f"⚠️ O seu ponto foi finalizado automaticamente por ter saído da call há mais de 3 minutos.\n{msg}")
+                await member.send(f"⚠️ O seu ponto foi finalizado automaticamente por ausência da call.\n{msg}")
             except Exception:
                 pass
     except asyncio.CancelledError:
@@ -180,7 +277,7 @@ async def agendar_fechamento_automatico(member):
         tarefas_fechamento.pop(member.id, None)
 
 # =============================================================
-# 5. PAINEL DE BOTÕES (DINÂMICO E SEM SPAM)
+# 6. PAINEL DE BOTÕES (UI)
 # =============================================================
 class PontoView(View):
     def __init__(self):
@@ -189,38 +286,30 @@ class PontoView(View):
     @discord.ui.button(label="Iniciar", style=discord.ButtonStyle.green, custom_id="btn_iniciar")
     async def btn_iniciar(self, interaction: discord.Interaction, button: Button):
         await interaction.response.defer(ephemeral=True)
-        sucesso, msg, estado = iniciar_ou_despausar_ponto(interaction.user.id)
+        sucesso, msg = await processar_iniciar(interaction)
         
         if interaction.user.id in tarefas_fechamento:
             tarefas_fechamento[interaction.user.id].cancel()
             tarefas_fechamento.pop(interaction.user.id, None)
             
-        # Resposta privada para o policial (evita spam no canal)
         await interaction.followup.send(msg, ephemeral=True)
 
-    @discord.ui.button(label="Pausar", style=discord.ButtonStyle.blurple, custom_id="btn_pausar")
+    @discord.ui.button(label="Pausar / Despausar", style=discord.ButtonStyle.blurple, custom_id="btn_pausar")
     async def btn_pausar(self, interaction: discord.Interaction, button: Button):
         await interaction.response.defer(ephemeral=True)
-        sucesso, msg, novo_estado = pausar_ponto(interaction.user.id)
-        
-        # Resposta privada confirmando a pausa/retomada sem lotar o chat
+        sucesso, msg = await processar_pausar(interaction)
         await interaction.followup.send(msg, ephemeral=True)
 
     @discord.ui.button(label="Finalizar", style=discord.ButtonStyle.red, custom_id="btn_finalizar")
     async def btn_finalizar(self, interaction: discord.Interaction, button: Button):
         await interaction.response.defer(ephemeral=True)
-        sucesso, msg = await finalizar_ponto_usuario(interaction.user)
+        sucesso, msg = await processar_finalizar(interaction.user, interaction.guild)
         
         if interaction.user.id in tarefas_fechamento:
             tarefas_fechamento[interaction.user.id].cancel()
             tarefas_fechamento.pop(interaction.user.id, None)
             
-        if sucesso:
-            # Envia APENAS o resumo final no canal público de forma limpa
-            await interaction.channel.send(msg)
-            await interaction.followup.send("Seu expediente foi encerrado e enviado ao canal!", ephemeral=True)
-        else:
-            await interaction.followup.send(msg, ephemeral=True)
+        await interaction.followup.send(msg, ephemeral=True)
 
     @discord.ui.button(label="Horas", style=discord.ButtonStyle.gray, custom_id="btn_horas")
     async def btn_horas(self, interaction: discord.Interaction, button: Button):
@@ -229,12 +318,18 @@ class PontoView(View):
         await interaction.followup.send(msg, ephemeral=True)
 
 # =============================================================
-# 6. COMANDOS E EVENTOS
+# 7. COMANDOS E EVENTOS
 # =============================================================
 @bot.event
 async def on_ready():
     bot.add_view(PontoView())
     print(f"Bot PMESP Bate-Ponto conectado com sucesso como: {bot.user}")
+
+@bot.command(name="set_log_channel")
+@commands.has_permissions(administrator=True)
+async def set_log_channel(ctx, channel: discord.TextChannel):
+    salvar_canal_log(ctx.guild.id, channel.id)
+    await ctx.send(f"✅ Canal de registros de ponto definido para: {channel.mention}")
 
 @bot.command(name="setup_ponto")
 @commands.has_permissions(administrator=True)
@@ -242,10 +337,10 @@ async def setup_ponto(ctx):
     embed = discord.Embed(
         title="🚔 **Bate-Ponto PMESP** 🚔",
         description="Clique nos botões abaixo para gerenciar o seu turno de patrulhamento:\n\n"
-                    "🟢 **Iniciar:** Inicia/retoma a contagem do seu ponto.\n"
-                    "🟡 **Pausar:** Coloca seu ponto em pausa ou retoma.\n"
-                    "🔴 **Finalizar:** Encerra o seu expediente e publica o resumo.\n"
-                    "📊 **Horas:** Consulta o seu total de horas acumuladas.",
+                    "🟢 **Iniciar:** Inicia o seu ponto.\n"
+                    "🟡 **Pausar / Despausar:** Alterna a pausa do seu ponto.\n"
+                    "🔴 **Finalizar:** Encerra o seu expediente.\n"
+                    "📊 **Horas:** Consulta o seu total acumulado.",
         color=discord.Color.dark_grey()
     )
     embed.set_footer(text="PMESP Bate Ponto • Sistema Automático")
@@ -260,7 +355,7 @@ async def on_voice_state_update(member, before, after):
         ponto = cursor.fetchone()
         conn.close()
         if ponto:
-            task = asyncio.create_task(agendar_fechamento_automatico(member))
+            task = asyncio.create_task(agendar_fechamento_automatico(member, member.guild))
             tarefas_fechamento[member.id] = task
 
     elif before.channel is None and after.channel is not None:
