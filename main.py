@@ -3,10 +3,20 @@ import sqlite3
 import asyncio
 import threading
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from flask import Flask
 import discord
 from discord.ext import commands
 from discord.ui import View, Button
+
+# Configuração do Fuso Horário do Brasil
+TZ_BR = ZoneInfo("America/Sao_Paulo")
+
+def obter_agora_str():
+    return datetime.now(TZ_BR).strftime("%H:%M:%S")
+
+def obter_agora_full_str():
+    return datetime.now(TZ_BR).strftime("%Y-%m-%d %H:%M:%S")
 
 # =============================================================
 # 1. SERVIDOR WEB (Render Free)
@@ -72,42 +82,51 @@ tarefas_fechamento = {}
 # =============================================================
 # 4. FUNÇÕES DE REGISTRO DE PONTO
 # =============================================================
-def iniciar_ponto(user_id):
+def iniciar_ou_despausar_ponto(user_id):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("SELECT id, status FROM registro_ponto WHERE user_id = ? AND status IN ('ABERTO', 'PAUSADO')", (user_id,))
     ponto = cursor.fetchone()
     
-    agora = datetime.now().strftime("%H:%M:%S")
+    agora_hora = obter_agora_str()
     if ponto:
         if ponto[1] == 'PAUSADO':
             cursor.execute("UPDATE registro_ponto SET status = 'ABERTO' WHERE id = ?", (ponto[0],))
             conn.commit()
             conn.close()
-            return True, f"🟢 **Ponto retomado** às **{agora}**."
+            return True, f"🟢 **Ponto retomado** às **{agora_hora}**.", "REMANEJADO"
         conn.close()
-        return False, "Você já possui um ponto aberto!"
+        return False, "Você já possui um ponto aberto!", "ABERTO"
     
-    agora_full = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    agora_full = obter_agora_full_str()
     cursor.execute("INSERT INTO registro_ponto (user_id, inicio, status) VALUES (?, ?, 'ABERTO')", (user_id, agora_full))
     conn.commit()
     conn.close()
-    return True, f"🟢 **Ponto iniciado** às **{agora}**."
+    return True, f"🟢 **Ponto iniciado** às **{agora_hora}**.", "NOVO"
 
 def pausar_ponto(user_id):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute("SELECT id FROM registro_ponto WHERE user_id = ? AND status = 'ABERTO'", (user_id,))
+    cursor.execute("SELECT id, status FROM registro_ponto WHERE user_id = ? AND status IN ('ABERTO', 'PAUSADO')", (user_id,))
     ponto = cursor.fetchone()
     
     if not ponto:
         conn.close()
-        return False, "Você não tem um ponto aberto para pausar."
-        
-    cursor.execute("UPDATE registro_ponto SET status = 'PAUSADO' WHERE id = ?", (ponto[0],))
-    conn.commit()
-    conn.close()
-    return True, "🟡 **Ponto pausado**."
+        return False, "Você não possui um ponto aberto para pausar.", "SEM_PONTO"
+    
+    if ponto[1] == 'PAUSADO':
+        # Se clicar quando já está pausado -> Despausa
+        cursor.execute("UPDATE registro_ponto SET status = 'ABERTO' WHERE id = ?", (ponto[0],))
+        conn.commit()
+        conn.close()
+        agora_hora = obter_agora_str()
+        return True, f"🟢 **Ponto retomado** às **{agora_hora}**.", "DESPAUSADO"
+    else:
+        # Pausa o ponto
+        cursor.execute("UPDATE registro_ponto SET status = 'PAUSADO' WHERE id = ?", (ponto[0],))
+        conn.commit()
+        conn.close()
+        return True, "🟡 **Ponto pausado**.", "PAUSADO"
 
 async def finalizar_ponto_usuario(member, motivo="Finalizado pelo usuário"):
     conn = sqlite3.connect(DB_PATH)
@@ -117,11 +136,11 @@ async def finalizar_ponto_usuario(member, motivo="Finalizado pelo usuário"):
     
     if not ponto:
         conn.close()
-        return False, "Nenhum ponto aberto encontrado."
+        return False, "Nenhum ponto aberto encontrado para finalizar."
     
     ponto_id, inicio_str = ponto
-    inicio_dt = datetime.strptime(inicio_str, "%Y-%m-%d %H:%M:%S")
-    agora_dt = datetime.now()
+    inicio_dt = datetime.strptime(inicio_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=TZ_BR)
+    agora_dt = datetime.now(TZ_BR)
     duracao_segundos = int((agora_dt - inicio_dt).total_seconds())
     
     horas, resto = divmod(duracao_segundos, 3600)
@@ -132,7 +151,8 @@ async def finalizar_ponto_usuario(member, motivo="Finalizado pelo usuário"):
                    (agora_dt.strftime("%Y-%m-%d %H:%M:%S"), duracao_segundos, ponto_id))
     conn.commit()
     conn.close()
-    return True, f"🔴 **Ponto finalizado!** Duração total: **{tempo_formatado}**."
+    
+    return True, f"🔴 **Ponto finalizado!** Duração total: **{tempo_formatado}**. ({member.mention})"
 
 def consultar_horas(user_id):
     conn = sqlite3.connect(DB_PATH)
@@ -143,7 +163,7 @@ def consultar_horas(user_id):
     
     horas, resto = divmod(total, 3600)
     minutos, _ = divmod(resto, 60)
-    return f"📊 **Total de horas acumuladas:** {horas}h {minutos}m."
+    return f"📊 **Seu total de horas acumuladas:** {horas}h {minutos}m."
 
 async def agendar_fechamento_automatico(member):
     try:
@@ -160,7 +180,7 @@ async def agendar_fechamento_automatico(member):
         tarefas_fechamento.pop(member.id, None)
 
 # =============================================================
-# 5. PAINEL DE BOTÕES (IGUAL À SUA IMAGEM)
+# 5. PAINEL DE BOTÕES (DINÂMICO E SEM SPAM)
 # =============================================================
 class PontoView(View):
     def __init__(self):
@@ -169,26 +189,38 @@ class PontoView(View):
     @discord.ui.button(label="Iniciar", style=discord.ButtonStyle.green, custom_id="btn_iniciar")
     async def btn_iniciar(self, interaction: discord.Interaction, button: Button):
         await interaction.response.defer(ephemeral=True)
-        sucesso, msg = iniciar_ponto(interaction.user.id)
+        sucesso, msg, estado = iniciar_ou_despausar_ponto(interaction.user.id)
+        
         if interaction.user.id in tarefas_fechamento:
             tarefas_fechamento[interaction.user.id].cancel()
             tarefas_fechamento.pop(interaction.user.id, None)
-        await interaction.followup.send(f"{msg} por {interaction.user.mention}", ephemeral=False)
+            
+        # Resposta privada para o policial (evita spam no canal)
+        await interaction.followup.send(msg, ephemeral=True)
 
     @discord.ui.button(label="Pausar", style=discord.ButtonStyle.blurple, custom_id="btn_pausar")
     async def btn_pausar(self, interaction: discord.Interaction, button: Button):
         await interaction.response.defer(ephemeral=True)
-        sucesso, msg = pausar_ponto(interaction.user.id)
-        await interaction.followup.send(f"{msg} por {interaction.user.mention}", ephemeral=False)
+        sucesso, msg, novo_estado = pausar_ponto(interaction.user.id)
+        
+        # Resposta privada confirmando a pausa/retomada sem lotar o chat
+        await interaction.followup.send(msg, ephemeral=True)
 
     @discord.ui.button(label="Finalizar", style=discord.ButtonStyle.red, custom_id="btn_finalizar")
     async def btn_finalizar(self, interaction: discord.Interaction, button: Button):
         await interaction.response.defer(ephemeral=True)
         sucesso, msg = await finalizar_ponto_usuario(interaction.user)
+        
         if interaction.user.id in tarefas_fechamento:
             tarefas_fechamento[interaction.user.id].cancel()
             tarefas_fechamento.pop(interaction.user.id, None)
-        await interaction.followup.send(f"{msg} ({interaction.user.mention})", ephemeral=False)
+            
+        if sucesso:
+            # Envia APENAS o resumo final no canal público de forma limpa
+            await interaction.channel.send(msg)
+            await interaction.followup.send("Seu expediente foi encerrado e enviado ao canal!", ephemeral=True)
+        else:
+            await interaction.followup.send(msg, ephemeral=True)
 
     @discord.ui.button(label="Horas", style=discord.ButtonStyle.gray, custom_id="btn_horas")
     async def btn_horas(self, interaction: discord.Interaction, button: Button):
@@ -208,11 +240,11 @@ async def on_ready():
 @commands.has_permissions(administrator=True)
 async def setup_ponto(ctx):
     embed = discord.Embed(
-        title="Bate-Ponto PMESP",
+        title="🚔 **Bate-Ponto PMESP** 🚔",
         description="Clique nos botões abaixo para gerenciar o seu turno de patrulhamento:\n\n"
-                    "🟢 **Iniciar:** Inicia a contagem do seu ponto.\n"
-                    "🟡 **Pausar:** Coloca seu ponto em pausa.\n"
-                    "🔴 **Finalizar:** Encerra o seu expediente e calcula o tempo.\n"
+                    "🟢 **Iniciar:** Inicia/retoma a contagem do seu ponto.\n"
+                    "🟡 **Pausar:** Coloca seu ponto em pausa ou retoma.\n"
+                    "🔴 **Finalizar:** Encerra o seu expediente e publica o resumo.\n"
                     "📊 **Horas:** Consulta o seu total de horas acumuladas.",
         color=discord.Color.dark_grey()
     )
@@ -224,7 +256,7 @@ async def on_voice_state_update(member, before, after):
     if before.channel is not None and after.channel is None:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
-        cursor.execute("SELECT id FROM registro_ponto WHERE user_id = ? AND status = 'ABERTO'", (member.id,))
+        cursor.execute("SELECT id FROM registro_ponto WHERE user_id = ? AND status IN ('ABERTO', 'PAUSADO')", (member.id,))
         ponto = cursor.fetchone()
         conn.close()
         if ponto:
