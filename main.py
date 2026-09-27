@@ -9,7 +9,7 @@ from discord.ext import commands
 from discord.ui import View, Button
 
 # =============================================================
-# 1. SERVIDOR WEB (Manter o bot ativo no Render)
+# 1. SERVIDOR WEB (Render Free)
 # =============================================================
 app = Flask('')
 
@@ -42,12 +42,12 @@ def setup_db():
             user_id INTEGER,
             inicio TEXT,
             fim TEXT,
-            status TEXT
+            status TEXT,
+            duracao_segundos INTEGER
         )
     """)
     conn.commit()
 
-    # Garante a coluna duracao_segundos sem quebrar bancos existentes
     try:
         cursor.execute("ALTER TABLE registro_ponto ADD COLUMN duracao_segundos INTEGER")
         conn.commit()
@@ -67,8 +67,6 @@ intents.members = True
 intents.voice_states = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
-
-# Dicionário para gerenciar tarefas de fechamento automático por usuário
 tarefas_fechamento = {}
 
 # =============================================================
@@ -77,29 +75,44 @@ tarefas_fechamento = {}
 def iniciar_ponto(user_id):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
+    cursor.execute("SELECT id, status FROM registro_ponto WHERE user_id = ? AND status IN ('ABERTO', 'PAUSADO')", (user_id,))
+    ponto = cursor.fetchone()
     
-    # Verifica se já existe um ponto aberto
-    cursor.execute("SELECT id FROM registro_ponto WHERE user_id = ? AND status = 'ABERTO'", (user_id,))
-    ponto_aberto = cursor.fetchone()
-    
-    if ponto_aberto:
+    agora = datetime.now().strftime("%H:%M:%S")
+    if ponto:
+        if ponto[1] == 'PAUSADO':
+            cursor.execute("UPDATE registro_ponto SET status = 'ABERTO' WHERE id = ?", (ponto[0],))
+            conn.commit()
+            conn.close()
+            return True, f"🟢 **Ponto retomado** às **{agora}**."
         conn.close()
         return False, "Você já possui um ponto aberto!"
     
-    agora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    cursor.execute("""
-        INSERT INTO registro_ponto (user_id, inicio, status)
-        VALUES (?, ?, 'ABERTO')
-    """, (user_id, agora))
+    agora_full = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    cursor.execute("INSERT INTO registro_ponto (user_id, inicio, status) VALUES (?, ?, 'ABERTO')", (user_id, agora_full))
     conn.commit()
     conn.close()
-    return True, f"Ponto iniciado com sucesso às **{agora}**!"
+    return True, f"🟢 **Ponto iniciado** às **{agora}**."
+
+def pausar_ponto(user_id):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT id FROM registro_ponto WHERE user_id = ? AND status = 'ABERTO'", (user_id,))
+    ponto = cursor.fetchone()
+    
+    if not ponto:
+        conn.close()
+        return False, "Você não tem um ponto aberto para pausar."
+        
+    cursor.execute("UPDATE registro_ponto SET status = 'PAUSADO' WHERE id = ?", (ponto[0],))
+    conn.commit()
+    conn.close()
+    return True, "🟡 **Ponto pausado**."
 
 async def finalizar_ponto_usuario(member, motivo="Finalizado pelo usuário"):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    
-    cursor.execute("SELECT id, inicio FROM registro_ponto WHERE user_id = ? AND status = 'ABERTO'", (member.id,))
+    cursor.execute("SELECT id, inicio FROM registro_ponto WHERE user_id = ? AND status IN ('ABERTO', 'PAUSADO')", (member.id,))
     ponto = cursor.fetchone()
     
     if not ponto:
@@ -109,26 +122,32 @@ async def finalizar_ponto_usuario(member, motivo="Finalizado pelo usuário"):
     ponto_id, inicio_str = ponto
     inicio_dt = datetime.strptime(inicio_str, "%Y-%m-%d %H:%M:%S")
     agora_dt = datetime.now()
-    agora_str = agora_dt.strftime("%Y-%m-%d %H:%M:%S")
-    
     duracao_segundos = int((agora_dt - inicio_dt).total_seconds())
+    
     horas, resto = divmod(duracao_segundos, 3600)
     minutos, segundos = divmod(resto, 60)
     tempo_formatado = f"{horas}h {minutos}m {segundos}s"
     
-    cursor.execute("""
-        UPDATE registro_ponto 
-        SET fim = ?, status = 'FECHADO', duracao_segundos = ?
-        WHERE id = ?
-    """, (agora_str, duracao_segundos, ponto_id))
+    cursor.execute("UPDATE registro_ponto SET fim = ?, status = 'FECHADO', duracao_segundos = ? WHERE id = ?", 
+                   (agora_dt.strftime("%Y-%m-%d %H:%M:%S"), duracao_segundos, ponto_id))
     conn.commit()
     conn.close()
+    return True, f"🔴 **Ponto finalizado!** Duração total: **{tempo_formatado}**."
+
+def consultar_horas(user_id):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT SUM(duracao_segundos) FROM registro_ponto WHERE user_id = ? AND status = 'FECHADO'", (user_id,))
+    total = cursor.fetchone()[0] or 0
+    conn.close()
     
-    return True, f"Ponto finalizado! Duração: **{tempo_formatado}**. Motivo: {motivo}"
+    horas, resto = divmod(total, 3600)
+    minutos, _ = divmod(resto, 60)
+    return f"📊 **Total de horas acumuladas:** {horas}h {minutos}m."
 
 async def agendar_fechamento_automatico(member):
     try:
-        await asyncio.sleep(180) # 3 minutos de tolerância após sair da call
+        await asyncio.sleep(180)
         sucesso, msg = await finalizar_ponto_usuario(member, motivo="Desconexão da call (>3 min)")
         if sucesso:
             try:
@@ -141,40 +160,44 @@ async def agendar_fechamento_automatico(member):
         tarefas_fechamento.pop(member.id, None)
 
 # =============================================================
-# 5. PAINEL DE BOTÕES (UI COM RESPOSTA RÁPIDA / DEFER)
+# 5. PAINEL DE BOTÕES (IGUAL À SUA IMAGEM)
 # =============================================================
 class PontoView(View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="Entrar em Serviço (Abrir Ponto)", style=discord.ButtonStyle.green, custom_id="btn_abrir_ponto")
-    async def abrir_ponto_btn(self, interaction: discord.Interaction, button: Button):
-        # Avisa ao Discord que o pedido foi recebido para evitar o erro de timeout
+    @discord.ui.button(label="Iniciar", style=discord.ButtonStyle.green, custom_id="btn_iniciar")
+    async def btn_iniciar(self, interaction: discord.Interaction, button: Button):
         await interaction.response.defer(ephemeral=True)
-        
         sucesso, msg = iniciar_ponto(interaction.user.id)
-        
         if interaction.user.id in tarefas_fechamento:
             tarefas_fechamento[interaction.user.id].cancel()
             tarefas_fechamento.pop(interaction.user.id, None)
-            
-        await interaction.followup.send(msg, ephemeral=True)
+        await interaction.followup.send(f"{msg} por {interaction.user.mention}", ephemeral=False)
 
-    @discord.ui.button(label="Sair de Serviço (Fechar Ponto)", style=discord.ButtonStyle.red, custom_id="btn_fechar_ponto")
-    async def fechar_ponto_btn(self, interaction: discord.Interaction, button: Button):
-        # Avisa ao Discord que o pedido foi recebido para evitar o erro de timeout
+    @discord.ui.button(label="Pausar", style=discord.ButtonStyle.blurple, custom_id="btn_pausar")
+    async def btn_pausar(self, interaction: discord.Interaction, button: Button):
         await interaction.response.defer(ephemeral=True)
-        
-        sucesso, msg = await finalizar_ponto_usuario(interaction.user, motivo="Finalizado manualmente via painel")
-        
+        sucesso, msg = pausar_ponto(interaction.user.id)
+        await interaction.followup.send(f"{msg} por {interaction.user.mention}", ephemeral=False)
+
+    @discord.ui.button(label="Finalizar", style=discord.ButtonStyle.red, custom_id="btn_finalizar")
+    async def btn_finalizar(self, interaction: discord.Interaction, button: Button):
+        await interaction.response.defer(ephemeral=True)
+        sucesso, msg = await finalizar_ponto_usuario(interaction.user)
         if interaction.user.id in tarefas_fechamento:
             tarefas_fechamento[interaction.user.id].cancel()
             tarefas_fechamento.pop(interaction.user.id, None)
-            
+        await interaction.followup.send(f"{msg} ({interaction.user.mention})", ephemeral=False)
+
+    @discord.ui.button(label="Horas", style=discord.ButtonStyle.gray, custom_id="btn_horas")
+    async def btn_horas(self, interaction: discord.Interaction, button: Button):
+        await interaction.response.defer(ephemeral=True)
+        msg = consultar_horas(interaction.user.id)
         await interaction.followup.send(msg, ephemeral=True)
 
 # =============================================================
-# 6. EVENTOS E COMANDOS DO BOT
+# 6. COMANDOS E EVENTOS
 # =============================================================
 @bot.event
 async def on_ready():
@@ -185,41 +208,35 @@ async def on_ready():
 @commands.has_permissions(administrator=True)
 async def setup_ponto(ctx):
     embed = discord.Embed(
-        title="🚔 **PMESP - SISTEMA DE BATE-PONTO** 🚔",
-        description="Utilize os botões abaixo para registrar o início ou término do seu serviço.",
-        color=discord.Color.blue()
+        title="Bate-Ponto PMESP",
+        description="Clique nos botões abaixo para gerenciar o seu turno de patrulhamento:\n\n"
+                    "🟢 **Iniciar:** Inicia a contagem do seu ponto.\n"
+                    "🟡 **Pausar:** Coloca seu ponto em pausa.\n"
+                    "🔴 **Finalizar:** Encerra o seu expediente e calcula o tempo.\n"
+                    "📊 **Horas:** Consulta o seu total de horas acumuladas.",
+        color=discord.Color.dark_grey()
     )
-    embed.set_footer(text="Polícia Militar do Estado de São Paulo")
+    embed.set_footer(text="PMESP Bate Ponto • Sistema Automático")
     await ctx.send(embed=embed, view=PontoView())
 
 @bot.event
 async def on_voice_state_update(member, before, after):
-    # Quando o usuário sai do canal de voz
     if before.channel is not None and after.channel is None:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         cursor.execute("SELECT id FROM registro_ponto WHERE user_id = ? AND status = 'ABERTO'", (member.id,))
         ponto = cursor.fetchone()
         conn.close()
-        
         if ponto:
-            # Agenda o fechamento automático após 3 minutos
             task = asyncio.create_task(agendar_fechamento_automatico(member))
             tarefas_fechamento[member.id] = task
 
-    # Quando o usuário volta ao canal de voz antes dos 3 minutos
     elif before.channel is None and after.channel is not None:
         if member.id in tarefas_fechamento:
             tarefas_fechamento[member.id].cancel()
             tarefas_fechamento.pop(member.id, None)
 
-# =============================================================
-# 7. INICIALIZAÇÃO
-# =============================================================
 TOKEN = os.environ.get("DISCORD_TOKEN")
-
 if __name__ == "__main__":
     if TOKEN:
         bot.run(TOKEN)
-    else:
-        print("ERRO: A variável de ambiente DISCORD_TOKEN não foi configurada!")
