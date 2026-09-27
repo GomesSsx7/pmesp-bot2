@@ -141,7 +141,7 @@ async def agendar_fechamento_automatico(member):
         tarefas_fechamento.pop(member.id, None)
 
 # =============================================================
-# 5. PAINEL DE BOTÕES (UI)
+# 5. PAINEL DE BOTÕES (UI COM RESPOSTA RÁPIDA / DEFER)
 # =============================================================
 class PontoView(View):
     def __init__(self):
@@ -149,24 +149,29 @@ class PontoView(View):
 
     @discord.ui.button(label="Entrar em Serviço (Abrir Ponto)", style=discord.ButtonStyle.green, custom_id="btn_abrir_ponto")
     async def abrir_ponto_btn(self, interaction: discord.Interaction, button: Button):
+        # Avisa ao Discord que o pedido foi recebido para evitar o erro de timeout
+        await interaction.response.defer(ephemeral=True)
+        
         sucesso, msg = iniciar_ponto(interaction.user.id)
         
-        # Se havia um agendamento de fechamento pendente por ter saído da call, cancela ele
         if interaction.user.id in tarefas_fechamento:
             tarefas_fechamento[interaction.user.id].cancel()
             tarefas_fechamento.pop(interaction.user.id, None)
             
-        await interaction.response.send_message(msg, ephemeral=True)
+        await interaction.followup.send(msg, ephemeral=True)
 
     @discord.ui.button(label="Sair de Serviço (Fechar Ponto)", style=discord.ButtonStyle.red, custom_id="btn_fechar_ponto")
     async def fechar_ponto_btn(self, interaction: discord.Interaction, button: Button):
+        # Avisa ao Discord que o pedido foi recebido para evitar o erro de timeout
+        await interaction.response.defer(ephemeral=True)
+        
         sucesso, msg = await finalizar_ponto_usuario(interaction.user, motivo="Finalizado manualmente via painel")
         
         if interaction.user.id in tarefas_fechamento:
             tarefas_fechamento[interaction.user.id].cancel()
             tarefas_fechamento.pop(interaction.user.id, None)
             
-        await interaction.response.send_message(msg, ephemeral=True)
+        await interaction.followup.send(msg, ephemeral=True)
 
 # =============================================================
 # 6. EVENTOS E COMANDOS DO BOT
