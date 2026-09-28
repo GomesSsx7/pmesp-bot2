@@ -138,21 +138,32 @@ def formatar_tempo_ranking(duracao_segundos):
         return f"{horas}h {minutos}m"
     return f"{minutos}m"
 
-def gerar_texto_log_pequeno(member_mention, inicio_hora, fim_hora="EM AÇÃO", total_str="", status="ABERTO"):
+def criar_embed_log(member: discord.Member, inicio_hora: str, fim_hora: str = "EM AÇÃO", total_str: str = "", status: str = "ABERTO") -> discord.Embed:
+    """Cria um Embed com fundo em caixa e barra lateral colorida mantendo exatamente os emojis originais."""
     if status == "PAUSADO":
+        cor = discord.Color.gold()
         fim_hora = "EM PAUSA"
         total_str = ""
     elif status == "ABERTO":
+        cor = discord.Color.green()
         fim_hora = "EM AÇÃO"
         total_str = ""
+    else:  # FECHADO
+        cor = discord.Color.red()
 
-    log = (
-        f"👤 **MEMBRO:** {member_mention}\n"
+    conteudo = (
+        f"👤 **MEMBRO:** {member.mention}\n"
         f"➕ **INÍCIO:** {inicio_hora}\n"
         f"⤓ **TÉRMINO:** {fim_hora}\n"
         f"⏱️ **TOTAL:** {total_str}".strip()
     )
-    return log
+
+    embed = discord.Embed(
+        description=conteudo,
+        color=cor
+    )
+    
+    return embed
 
 # =============================================================
 # 5. LÓGICA DO PONTO
@@ -190,8 +201,8 @@ async def processar_iniciar(interaction: discord.Interaction):
     agora_full = obter_agora_full_str()
     agora_hora = obter_agora_hora_str()
     
-    texto_log = gerar_texto_log_pequeno(user.mention, agora_hora, "EM AÇÃO", "", "ABERTO")
-    msg_log = await log_channel.send(texto_log)
+    embed_log = criar_embed_log(user, agora_hora, status="ABERTO")
+    msg_log = await log_channel.send(embed=embed_log)
     
     cursor.execute("""
         INSERT INTO registro_ponto (user_id, inicio, status, log_msg_id, log_channel_id)
@@ -203,10 +214,10 @@ async def processar_iniciar(interaction: discord.Interaction):
     return True, f"🟢 **Ponto iniciado!** Registro publicado em {log_channel.mention}."
 
 async def processar_pausar(interaction: discord.Interaction):
-    user_id = interaction.user.id
+    user = interaction.user
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute("SELECT id, inicio, status, log_msg_id, log_channel_id FROM registro_ponto WHERE user_id = ? AND status IN ('ABERTO', 'PAUSADO')", (user_id,))
+    cursor.execute("SELECT id, inicio, status, log_msg_id, log_channel_id FROM registro_ponto WHERE user_id = ? AND status IN ('ABERTO', 'PAUSADO')", (user.id,))
     ponto = cursor.fetchone()
     
     if not ponto:
@@ -227,8 +238,8 @@ async def processar_pausar(interaction: discord.Interaction):
         channel = interaction.guild.get_channel(channel_id)
         if channel:
             msg = await channel.fetch_message(msg_id)
-            texto_log = gerar_texto_log_pequeno(interaction.user.mention, inicio_hora, status=novo_status)
-            await msg.edit(content=texto_log)
+            embed_log = criar_embed_log(user, inicio_hora, status=novo_status)
+            await msg.edit(embed=embed_log)
     except Exception:
         pass
         
@@ -267,8 +278,8 @@ async def processar_finalizar(member, guild, motivo="Finalizado pelo usuário"):
         channel = guild.get_channel(channel_id)
         if channel:
             msg = await channel.fetch_message(msg_id)
-            texto_log = gerar_texto_log_pequeno(member.mention, inicio_hora, fim_hora, tempo_fmt, "FECHADO")
-            await msg.edit(content=texto_log)
+            embed_log = criar_embed_log(member, inicio_hora, fim_hora, tempo_fmt, "FECHADO")
+            await msg.edit(embed=embed_log)
     except Exception:
         pass
         
