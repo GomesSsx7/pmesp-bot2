@@ -9,7 +9,7 @@ import discord
 from discord.ext import commands
 from discord.ui import View, Button
 
-# Configuração do Fuso Horário do Brasil
+# Configuração do Fuso Horário do Brasil (Brasília)
 TZ_BR = ZoneInfo("America/Sao_Paulo")
 
 def obter_agora_dt():
@@ -50,7 +50,6 @@ def setup_db():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     
-    # Tabela principal com suporte a ID da mensagem do Log e canal
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS registro_ponto (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -64,7 +63,6 @@ def setup_db():
         )
     """)
     
-    # Tabela para salvar o canal padrão de logs
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS config_servidor (
             guild_id INTEGER PRIMARY KEY,
@@ -73,7 +71,6 @@ def setup_db():
     """)
     conn.commit()
 
-    # Migrações preventivas
     for col in ["duracao_segundos INTEGER", "log_msg_id INTEGER", "log_channel_id INTEGER"]:
         try:
             cursor.execute(f"ALTER TABLE registro_ponto ADD COLUMN {col}")
@@ -97,7 +94,7 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 tarefas_fechamento = {}
 
 # =============================================================
-# 4. FUNÇÕES AUXILIARES DE LOG
+# 4. FUNÇÕES AUXILIARES DE FORMATAÇÃO E LOGS
 # =============================================================
 def obter_canal_log(guild_id):
     conn = sqlite3.connect(DB_PATH)
@@ -123,22 +120,25 @@ def formatar_tempo(duracao_segundos):
     minutos, _ = divmod(resto, 60)
     return f"{horas:02d}:{minutos:02d}"
 
-def gerar_texto_log(member_mention, inicio_hora, fim_hora="--:--", total_str="Em andamento...", status="ABERTO"):
-    status_tag = ""
+def gerar_texto_log_pequeno(member_mention, inicio_hora, fim_hora="EM AÇÃO", total_str="", status="ABERTO"):
+    # Formatação compacta exatamente igual à imagem enviada
     if status == "PAUSADO":
-        status_tag = " 🟡 *(Pausado)*"
-    elif status == "FECHADO":
-        status_tag = ""
+        fim_hora = "EM PAUSA"
+        total_str = ""
+    elif status == "ABERTO":
+        fim_hora = "EM AÇÃO"
+        total_str = ""
 
-    return (
+    log = (
         f"👤 **MEMBRO:** {member_mention}\n"
         f"➕ **INÍCIO:** {inicio_hora}\n"
         f"⤓ **TÉRMINO:** {fim_hora}\n"
-        f"⏱️ **TOTAL:** {total_str}{status_tag}"
+        f"⏱️ **TOTAL:** {total_str}".strip()
     )
+    return log
 
 # =============================================================
-# 5. LÓGICA DE REGISTRO DO PONTO
+# 5. LÓGICA DO PONTO
 # =============================================================
 async def processar_iniciar(interaction: discord.Interaction):
     user_id = interaction.user.id
@@ -166,8 +166,7 @@ async def processar_iniciar(interaction: discord.Interaction):
     agora_full = obter_agora_full_str()
     agora_hora = obter_agora_hora_str()
     
-    # Envia a mensagem inicial formatada no canal de logs
-    texto_log = gerar_texto_log(interaction.user.mention, agora_hora, "--:--", "Em andamento...", "ABERTO")
+    texto_log = gerar_texto_log_pequeno(interaction.user.mention, agora_hora, "EM AÇÃO", "", "ABERTO")
     msg_log = await log_channel.send(texto_log)
     
     cursor.execute("""
@@ -177,7 +176,7 @@ async def processar_iniciar(interaction: discord.Interaction):
     conn.commit()
     conn.close()
     
-    return True, f"🟢 **Ponto iniciado!** Registro publicado em {log_channel.mention}."
+    return True, f"🟢 **Ponto iniciado!** Registro atualizado em {log_channel.mention}."
 
 async def processar_pausar(interaction: discord.Interaction):
     user_id = interaction.user.id
@@ -188,7 +187,7 @@ async def processar_pausar(interaction: discord.Interaction):
     
     if not ponto:
         conn.close()
-        return False, "Você não tem um ponto em andamento para pausar/despausar."
+        return False, "Você não possui um ponto aberto para pausar/despausar."
         
     ponto_id, inicio_str, status_atual, msg_id, channel_id = ponto
     inicio_dt = datetime.strptime(inicio_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=TZ_BR)
@@ -200,17 +199,16 @@ async def processar_pausar(interaction: discord.Interaction):
     conn.commit()
     conn.close()
     
-    # Atualiza a mensagem no canal de logs
     try:
         channel = interaction.guild.get_channel(channel_id)
         if channel:
             msg = await channel.fetch_message(msg_id)
-            texto_log = gerar_texto_log(interaction.user.mention, inicio_hora, "--:--", "Em andamento...", novo_status)
+            texto_log = gerar_texto_log_pequeno(interaction.user.mention, inicio_hora, status=novo_status)
             await msg.edit(content=texto_log)
     except Exception:
         pass
         
-    msg_retorno = "🟡 **Ponto pausado.**" if novo_status == "PAUSADO" else "🟢 **Ponto despausado/retomado.**"
+    msg_retorno = "🟡 **Ponto pausado.**" if novo_status == "PAUSADO" else "🟢 **Ponto retomado.**"
     return True, msg_retorno
 
 async def processar_finalizar(member, guild, motivo="Finalizado pelo usuário"):
@@ -241,17 +239,16 @@ async def processar_finalizar(member, guild, motivo="Finalizado pelo usuário"):
     conn.commit()
     conn.close()
     
-    # Edita a mensagem no canal de logs com o resultado final
     try:
         channel = guild.get_channel(channel_id)
         if channel:
             msg = await channel.fetch_message(msg_id)
-            texto_log = gerar_texto_log(member.mention, inicio_hora, fim_hora, tempo_fmt, "FECHADO")
+            texto_log = gerar_texto_log_pequeno(member.mention, inicio_hora, fim_hora, tempo_fmt, "FECHADO")
             await msg.edit(content=texto_log)
     except Exception:
         pass
         
-    return True, f"🔴 **Ponto finalizado!** Duração total: **{tempo_fmt}**."
+    return True, f"🔴 **Ponto finalizado!** Duração: **{tempo_fmt}**."
 
 def consultar_horas(user_id):
     conn = sqlite3.connect(DB_PATH)
@@ -264,7 +261,7 @@ def consultar_horas(user_id):
 
 async def agendar_fechamento_automatico(member, guild):
     try:
-        await asyncio.sleep(180) # 3 minutos de tolerância
+        await asyncio.sleep(180)
         sucesso, msg = await processar_finalizar(member, guild, motivo="Desconexão da call (>3 min)")
         if sucesso:
             try:
