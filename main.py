@@ -12,6 +12,17 @@ from discord.ui import View, Button
 # Configuração do Fuso Horário do Brasil (Brasília)
 TZ_BR = ZoneInfo("America/Sao_Paulo")
 
+# Lista de IDs das calls permitidas para abrir ponto
+CALLS_PERMITIDAS = [
+    1551736045324730398,
+    1551736077050581002,
+    1551736102124265554,
+    1553592199168532510,
+    1553592245008076900,
+    1553592276259836025,
+    1551736815986155531
+]
+
 def obter_agora_dt():
     return datetime.now(TZ_BR)
 
@@ -120,8 +131,14 @@ def formatar_tempo(duracao_segundos):
     minutos, _ = divmod(resto, 60)
     return f"{horas:02d}:{minutos:02d}"
 
+def formatar_tempo_ranking(duracao_segundos):
+    horas, resto = divmod(duracao_segundos, 3600)
+    minutos, _ = divmod(resto, 60)
+    if horas > 0:
+        return f"{horas}h {minutos}m"
+    return f"{minutos}m"
+
 def gerar_texto_log_pequeno(member_mention, inicio_hora, fim_hora="EM AÇÃO", total_str="", status="ABERTO"):
-    # Formatação compacta exatamente igual à imagem enviada
     if status == "PAUSADO":
         fim_hora = "EM PAUSA"
         total_str = ""
@@ -141,12 +158,19 @@ def gerar_texto_log_pequeno(member_mention, inicio_hora, fim_hora="EM AÇÃO", t
 # 5. LÓGICA DO PONTO
 # =============================================================
 async def processar_iniciar(interaction: discord.Interaction):
-    user_id = interaction.user.id
+    user = interaction.user
     guild_id = interaction.guild.id
+    
+    # Validação de presença em call de voz autorizada
+    if not user.voice or not user.voice.channel:
+        return False, "❌ **Você precisa estar conectado em uma call autorizada para abrir o ponto!**"
+        
+    if user.voice.channel.id not in CALLS_PERMITIDAS:
+        return False, "❌ **Você não está em uma call autorizada para abrir ponto!**"
     
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute("SELECT id, status FROM registro_ponto WHERE user_id = ? AND status IN ('ABERTO', 'PAUSADO')", (user_id,))
+    cursor.execute("SELECT id, status FROM registro_ponto WHERE user_id = ? AND status IN ('ABERTO', 'PAUSADO')", (user.id,))
     ponto = cursor.fetchone()
     
     if ponto:
@@ -166,17 +190,17 @@ async def processar_iniciar(interaction: discord.Interaction):
     agora_full = obter_agora_full_str()
     agora_hora = obter_agora_hora_str()
     
-    texto_log = gerar_texto_log_pequeno(interaction.user.mention, agora_hora, "EM AÇÃO", "", "ABERTO")
+    texto_log = gerar_texto_log_pequeno(user.mention, agora_hora, "EM AÇÃO", "", "ABERTO")
     msg_log = await log_channel.send(texto_log)
     
     cursor.execute("""
         INSERT INTO registro_ponto (user_id, inicio, status, log_msg_id, log_channel_id)
         VALUES (?, ?, 'ABERTO', ?, ?)
-    """, (user_id, agora_full, msg_log.id, log_channel.id))
+    """, (user.id, agora_full, msg_log.id, log_channel.id))
     conn.commit()
     conn.close()
     
-    return True, f"🟢 **Ponto iniciado!** Registro atualizado em {log_channel.mention}."
+    return True, f"🟢 **Ponto iniciado!** Registro publicado em {log_channel.mention}."
 
 async def processar_pausar(interaction: discord.Interaction):
     user_id = interaction.user.id
@@ -285,7 +309,7 @@ class PontoView(View):
         await interaction.response.defer(ephemeral=True)
         sucesso, msg = await processar_iniciar(interaction)
         
-        if interaction.user.id in tarefas_fechamento:
+        if sucesso and interaction.user.id in tarefas_fechamento:
             tarefas_fechamento[interaction.user.id].cancel()
             tarefas_fechamento.pop(interaction.user.id, None)
             
@@ -342,6 +366,50 @@ async def setup_ponto(ctx):
     )
     embed.set_footer(text="PMESP Bate Ponto • Sistema Automático")
     await ctx.send(embed=embed, view=PontoView())
+
+@bot.command(name="ranking")
+async def ranking(ctx):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    
+    cursor.execute("""
+        SELECT user_id, SUM(duracao_segundos) as total_segundos 
+        FROM registro_ponto 
+        WHERE status = 'FECHADO' AND duracao_segundos IS NOT NULL
+        GROUP BY user_id 
+        ORDER BY total_segundos DESC
+    """)
+    resultados = cursor.fetchall()
+    conn.close()
+
+    if not resultados:
+        await ctx.send("ℹ️ Nenhum registro de ponto finalizado foi encontrado para gerar o ranking.")
+        return
+
+    embed = discord.Embed(
+        title="🏆 Ranking de Tempo - Total",
+        color=discord.Color.blue()
+    )
+
+    emojis_posicao = ["🥇", "🥈", "🥉"]
+    linhas_ranking = []
+
+    for idx, (user_id, total_segundos) in enumerate(resultados, start=1):
+        tempo_str = formatar_tempo_ranking(total_segundos)
+        
+        if idx <= 3:
+            pos_str = f"{emojis_posicao[idx-1]} **{idx}º**"
+        else:
+            pos_str = f"🏅 **{idx}º**"
+
+        linhas_ranking.append(f"{pos_str} <@{user_id}>  -  **{tempo_str}**")
+
+    embed.description = "\n".join(linhas_ranking)
+    
+    agora_hora = obter_agora_hora_str()
+    embed.set_footer(text=f"Página 1/1 • Total: {len(resultados)} usuários • Hoje às {agora_hora}")
+
+    await ctx.send(embed=embed)
 
 @bot.event
 async def on_voice_state_update(member, before, after):
