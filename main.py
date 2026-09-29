@@ -23,6 +23,9 @@ CALLS_PERMITIDAS = [
     1551736815986155531
 ]
 
+# Tempo mínimo em segundos (30 minutos = 1800 segundos)
+TEMPO_MINIMO_SEGUNDOS = 1800
+
 def obter_agora_dt():
     return datetime.now(TZ_BR)
 
@@ -70,7 +73,8 @@ def setup_db():
             status TEXT,
             duracao_segundos INTEGER,
             log_msg_id INTEGER,
-            log_channel_id INTEGER
+            log_channel_id INTEGER,
+            valido INTEGER DEFAULT 1
         )
     """)
     
@@ -82,7 +86,7 @@ def setup_db():
     """)
     conn.commit()
 
-    for col in ["duracao_segundos INTEGER", "log_msg_id INTEGER", "log_channel_id INTEGER"]:
+    for col in ["duracao_segundos INTEGER", "log_msg_id INTEGER", "log_channel_id INTEGER", "valido INTEGER DEFAULT 1"]:
         try:
             cursor.execute(f"ALTER TABLE registro_ponto ADD COLUMN {col}")
             conn.commit()
@@ -138,8 +142,7 @@ def formatar_tempo_ranking(duracao_segundos):
         return f"{horas}h {minutos}m"
     return f"{minutos}m"
 
-def criar_embed_log(member: discord.Member, inicio_hora: str, fim_hora: str = "EM AÇÃO", total_str: str = "", status: str = "ABERTO") -> discord.Embed:
-    """Cria um Embed com fundo em caixa e barra lateral colorida mantendo exatamente os emojis originais."""
+def criar_embed_log(member: discord.Member, inicio_hora: str, fim_hora: str = "EM AÇÃO", total_str: str = "", status: str = "ABERTO", e_valido: bool = True) -> discord.Embed:
     if status == "PAUSADO":
         cor = discord.Color.gold()
         fim_hora = "EM PAUSA"
@@ -149,14 +152,17 @@ def criar_embed_log(member: discord.Member, inicio_hora: str, fim_hora: str = "E
         fim_hora = "EM AÇÃO"
         total_str = ""
     else:  # FECHADO
-        cor = discord.Color.red()
+        cor = discord.Color.green() if e_valido else discord.Color.red()
 
     conteudo = (
         f"👤 **MEMBRO:** {member.mention}\n"
         f"➕ **INÍCIO:** {inicio_hora}\n"
         f"⤓ **TÉRMINO:** {fim_hora}\n"
-        f"⏱️ **TOTAL:** {total_str}".strip()
+        f"⏱️ **TOTAL:** {total_str}"
     )
+
+    if status == "FECHADO" and not e_valido:
+        conteudo += "\n\n⚠️ *Ponto inválido (<30 min - Não contabilizado)*"
 
     embed = discord.Embed(
         description=conteudo,
@@ -172,7 +178,6 @@ async def processar_iniciar(interaction: discord.Interaction):
     user = interaction.user
     guild_id = interaction.guild.id
     
-    # Validação de presença em call de voz autorizada
     if not user.voice or not user.voice.channel:
         return False, "❌ **Você precisa estar conectado em uma call autorizada para abrir o ponto!**"
         
@@ -266,11 +271,14 @@ async def processar_finalizar(member, guild, motivo="Finalizado pelo usuário"):
     inicio_hora = inicio_dt.strftime("%H:%M")
     fim_hora = agora_dt.strftime("%H:%M")
     
+    # Verifica se cumpriu o tempo mínimo de 30 minutos (1800 segundos)
+    e_valido = 1 if duracao_segundos >= TEMPO_MINIMO_SEGUNDOS else 0
+    
     cursor.execute("""
         UPDATE registro_ponto 
-        SET fim = ?, status = 'FECHADO', duracao_segundos = ? 
+        SET fim = ?, status = 'FECHADO', duracao_segundos = ?, valido = ?
         WHERE id = ?
-    """, (agora_dt.strftime("%Y-%m-%d %H:%M:%S"), duracao_segundos, ponto_id))
+    """, (agora_dt.strftime("%Y-%m-%d %H:%M:%S"), duracao_segundos, e_valido, ponto_id))
     conn.commit()
     conn.close()
     
@@ -278,17 +286,24 @@ async def processar_finalizar(member, guild, motivo="Finalizado pelo usuário"):
         channel = guild.get_channel(channel_id)
         if channel:
             msg = await channel.fetch_message(msg_id)
-            embed_log = criar_embed_log(member, inicio_hora, fim_hora, tempo_fmt, "FECHADO")
+            embed_log = criar_embed_log(member, inicio_hora, fim_hora, tempo_fmt, "FECHADO", e_valido=bool(e_valido))
             await msg.edit(embed=embed_log)
+            
+            # Adiciona o emoji de verificação de tempo
+            emoji_reacao = "✅" if e_valido else "❌"
+            await msg.add_reaction(emoji_reacao)
     except Exception:
         pass
         
-    return True, f"🔴 **Ponto finalizado!** Duração: **{tempo_fmt}**."
+    if e_valido:
+        return True, f"🔴 **Ponto finalizado!** Duração: **{tempo_fmt}** (Contabilizado ✅)."
+    else:
+        return True, f"🔴 **Ponto finalizado!** Duração: **{tempo_fmt}**.\n⚠️ *Ponto não contabilizado por ter menos de 30 minutos (❌).* "
 
 def consultar_horas(user_id):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute("SELECT SUM(duracao_segundos) FROM registro_ponto WHERE user_id = ? AND status = 'FECHADO'", (user_id,))
+    cursor.execute("SELECT SUM(duracao_segundos) FROM registro_ponto WHERE user_id = ? AND status = 'FECHADO' AND valido = 1", (user_id,))
     total = cursor.fetchone()[0] or 0
     conn.close()
     
@@ -300,7 +315,7 @@ async def agendar_fechamento_automatico(member, guild):
         sucesso, msg = await processar_finalizar(member, guild, motivo="Desconexão da call (>3 min)")
         if sucesso:
             try:
-                await member.send(f"⚠️ O seu ponto foi finalizado automaticamente por ausência da call.\n{msg}")
+                await member.send(f"⚠️️ O seu ponto foi finalizado automaticamente por ausência da call.\n{msg}")
             except Exception:
                 pass
     except asyncio.CancelledError:
@@ -315,7 +330,7 @@ class PontoView(View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="Iniciar", style=discord.ButtonStyle.green, custom_id="btn_iniciar")
+    @discord.ui.button(label="ABRIR", style=discord.ButtonStyle.green, custom_id="btn_iniciar")
     async def btn_iniciar(self, interaction: discord.Interaction, button: Button):
         await interaction.response.defer(ephemeral=True)
         sucesso, msg = await processar_iniciar(interaction)
@@ -326,13 +341,13 @@ class PontoView(View):
             
         await interaction.followup.send(msg, ephemeral=True)
 
-    @discord.ui.button(label="Pausar / Despausar", style=discord.ButtonStyle.blurple, custom_id="btn_pausar")
+    @discord.ui.button(label="PAUSAR", style=discord.ButtonStyle.blurple, custom_id="btn_pausar")
     async def btn_pausar(self, interaction: discord.Interaction, button: Button):
         await interaction.response.defer(ephemeral=True)
         sucesso, msg = await processar_pausar(interaction)
         await interaction.followup.send(msg, ephemeral=True)
 
-    @discord.ui.button(label="Finalizar", style=discord.ButtonStyle.red, custom_id="btn_finalizar")
+    @discord.ui.button(label="FECHAR", style=discord.ButtonStyle.red, custom_id="btn_finalizar")
     async def btn_finalizar(self, interaction: discord.Interaction, button: Button):
         await interaction.response.defer(ephemeral=True)
         sucesso, msg = await processar_finalizar(interaction.user, interaction.guild)
@@ -343,7 +358,7 @@ class PontoView(View):
             
         await interaction.followup.send(msg, ephemeral=True)
 
-    @discord.ui.button(label="Horas", style=discord.ButtonStyle.gray, custom_id="btn_horas")
+    @discord.ui.button(label="HORAS", style=discord.ButtonStyle.gray, custom_id="btn_horas")
     async def btn_horas(self, interaction: discord.Interaction, button: Button):
         await interaction.response.defer(ephemeral=True)
         msg = consultar_horas(interaction.user.id)
@@ -367,15 +382,15 @@ async def set_log_channel(ctx, channel: discord.TextChannel):
 @commands.has_permissions(administrator=True)
 async def setup_ponto(ctx):
     embed = discord.Embed(
-        title="🚔 **Bate-Ponto PMESP** 🚔",
-        description="Clique nos botões abaixo para gerenciar o seu turno de patrulhamento:\n\n"
-                    "🟢 **Iniciar:** Inicia o seu ponto.\n"
-                    "🟡 **Pausar / Despausar:** Alterna a pausa do seu ponto.\n"
-                    "🔴 **Finalizar:** Encerra o seu expediente.\n"
-                    "📊 **Horas:** Consulta o seu total acumulado.",
-        color=discord.Color.dark_grey()
+        title="🌐 | BATE PONTO PMESP",
+        description="O bate-ponto é utilizado para contabilizar as horas de atividade de um membro no servidor. "
+                    "Cada ponto deverá possuir um acúmulo mínimo de 30 minutos para ser registrado e contabilizado no banco de horas.\n\n"
+                    "ℹ️ **Funcionamento**\n\n"
+                    "> Para iniciar um registro de ponto o membro deverá entrar em qualquer canal de voz da categoria **#PATRULHAMENTO PMESP** e clicar no botão \"ABRIR\" localizado abaixo.\n\n"
+                    "> Para finalizar o registro, o membro deve permanecer no canal de voz e utilizar o botão \"FECHAR\" para que o ponto seja contabilizado. Caso o membro saia do canal de voz sem utilizar o comando o ponto é finalizado automaticamente após 3 minutos.\n\n"
+                    "> Para verificar o total de horas registradas, basta acionar o botão \"HORAS\".",
+        color=discord.Color.dark_theme()
     )
-    embed.set_footer(text="PMESP Bate Ponto • Sistema Automático")
     await ctx.send(embed=embed, view=PontoView())
 
 @bot.command(name="ranking")
@@ -386,7 +401,7 @@ async def ranking(ctx):
     cursor.execute("""
         SELECT user_id, SUM(duracao_segundos) as total_segundos 
         FROM registro_ponto 
-        WHERE status = 'FECHADO' AND duracao_segundos IS NOT NULL
+        WHERE status = 'FECHADO' AND valido = 1 AND duracao_segundos IS NOT NULL
         GROUP BY user_id 
         ORDER BY total_segundos DESC
     """)
@@ -394,7 +409,7 @@ async def ranking(ctx):
     conn.close()
 
     if not resultados:
-        await ctx.send("ℹ️ Nenhum registro de ponto finalizado foi encontrado para gerar o ranking.")
+        await ctx.send("ℹ️ Nenhum registro de ponto válido foi encontrado para gerar o ranking.")
         return
 
     embed = discord.Embed(
@@ -431,8 +446,8 @@ async def on_voice_state_update(member, before, after):
         ponto = cursor.fetchone()
         conn.close()
         if ponto:
-            task = asyncio.create_task(agendar_fechamento_automatico(member, member.guild))
-            tarefas_fechamento[member.id] = task
+            task = asyncio.sleep(180) # 3 minutos
+            tarefas_fechamento[member.id] = asyncio.create_task(agendar_fechamento_automatico(member, member.guild))
 
     elif before.channel is None and after.channel is not None:
         if member.id in tarefas_fechamento:
