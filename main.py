@@ -143,11 +143,7 @@ def formatar_tempo_ranking(duracao_segundos):
     return f"{minutos}m"
 
 def criar_embed_log(member: discord.Member, inicio_hora: str, fim_hora: str = "EM AÇÃO", total_str: str = "", status: str = "ABERTO", e_valido: bool = True) -> discord.Embed:
-    if status == "PAUSADO":
-        cor = discord.Color.gold()
-        fim_hora = "EM PAUSA"
-        total_str = ""
-    elif status == "ABERTO":
+    if status == "ABERTO":
         cor = discord.Color.green()
         fim_hora = "EM AÇÃO"
         total_str = ""
@@ -186,7 +182,7 @@ async def processar_iniciar(interaction: discord.Interaction):
     
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute("SELECT id, status FROM registro_ponto WHERE user_id = ? AND status IN ('ABERTO', 'PAUSADO')", (user.id,))
+    cursor.execute("SELECT id FROM registro_ponto WHERE user_id = ? AND status = 'ABERTO'", (user.id,))
     ponto = cursor.fetchone()
     
     if ponto:
@@ -218,43 +214,10 @@ async def processar_iniciar(interaction: discord.Interaction):
     
     return True, f"🟢 **Ponto iniciado!** Registro publicado em {log_channel.mention}."
 
-async def processar_pausar(interaction: discord.Interaction):
-    user = interaction.user
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("SELECT id, inicio, status, log_msg_id, log_channel_id FROM registro_ponto WHERE user_id = ? AND status IN ('ABERTO', 'PAUSADO')", (user.id,))
-    ponto = cursor.fetchone()
-    
-    if not ponto:
-        conn.close()
-        return False, "Você não possui um ponto aberto para pausar/despausar."
-        
-    ponto_id, inicio_str, status_atual, msg_id, channel_id = ponto
-    inicio_dt = datetime.strptime(inicio_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=TZ_BR)
-    inicio_hora = inicio_dt.strftime("%H:%M")
-    
-    novo_status = "PAUSADO" if status_atual == "ABERTO" else "ABERTO"
-    
-    cursor.execute("UPDATE registro_ponto SET status = ? WHERE id = ?", (novo_status, ponto_id))
-    conn.commit()
-    conn.close()
-    
-    try:
-        channel = interaction.guild.get_channel(channel_id)
-        if channel:
-            msg = await channel.fetch_message(msg_id)
-            embed_log = criar_embed_log(user, inicio_hora, status=novo_status)
-            await msg.edit(embed=embed_log)
-    except Exception:
-        pass
-        
-    msg_retorno = "🟡 **Ponto pausado.**" if novo_status == "PAUSADO" else "🟢 **Ponto retomado.**"
-    return True, msg_retorno
-
 async def processar_finalizar(member, guild, motivo="Finalizado pelo usuário"):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute("SELECT id, inicio, log_msg_id, log_channel_id FROM registro_ponto WHERE user_id = ? AND status IN ('ABERTO', 'PAUSADO')", (member.id,))
+    cursor.execute("SELECT id, inicio, log_msg_id, log_channel_id FROM registro_ponto WHERE user_id = ? AND status = 'ABERTO'", (member.id,))
     ponto = cursor.fetchone()
     
     if not ponto:
@@ -315,7 +278,7 @@ async def agendar_fechamento_automatico(member, guild):
         sucesso, msg = await processar_finalizar(member, guild, motivo="Desconexão da call (>3 min)")
         if sucesso:
             try:
-                await member.send(f"⚠️️ O seu ponto foi finalizado automaticamente por ausência da call.\n{msg}")
+                await member.send(f"⚠ O seu ponto foi finalizado automaticamente por ausência da call.\n{msg}")
             except Exception:
                 pass
     except asyncio.CancelledError:
@@ -339,12 +302,6 @@ class PontoView(View):
             tarefas_fechamento[interaction.user.id].cancel()
             tarefas_fechamento.pop(interaction.user.id, None)
             
-        await interaction.followup.send(msg, ephemeral=True)
-
-    @discord.ui.button(label="PAUSAR", style=discord.ButtonStyle.blurple, custom_id="btn_pausar")
-    async def btn_pausar(self, interaction: discord.Interaction, button: Button):
-        await interaction.response.defer(ephemeral=True)
-        sucesso, msg = await processar_pausar(interaction)
         await interaction.followup.send(msg, ephemeral=True)
 
     @discord.ui.button(label="FECHAR", style=discord.ButtonStyle.red, custom_id="btn_finalizar")
@@ -442,7 +399,7 @@ async def on_voice_state_update(member, before, after):
     if before.channel is not None and after.channel is None:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
-        cursor.execute("SELECT id FROM registro_ponto WHERE user_id = ? AND status IN ('ABERTO', 'PAUSADO')", (member.id,))
+        cursor.execute("SELECT id FROM registro_ponto WHERE user_id = ? AND status = 'ABERTO'", (member.id,))
         ponto = cursor.fetchone()
         conn.close()
         if ponto:
