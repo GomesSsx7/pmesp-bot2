@@ -142,32 +142,49 @@ def formatar_tempo_ranking(duracao_segundos):
         return f"{horas}h {minutos}m"
     return f"{minutos}m"
 
-def criar_embed_log(member: discord.Member, inicio_hora: str, fim_hora: str = "EM AÇÃO", total_str: str = "", status: str = "ABERTO", e_valido: bool = True) -> discord.Embed:
+def criar_embed_log(member: discord.Member, inicio_hora: str, fim_hora: str = "—", total_str: str = "Em andamento...", status: str = "ABERTO", e_valido: bool = True) -> discord.Embed:
     if status == "ABERTO":
         cor = discord.Color.green()
-        fim_hora = "Em andamento..."
+        fim_hora = "—"
+        total_str = "🕒 Em andamento..."
     else:  # FECHADO
         cor = discord.Color.green() if e_valido else discord.Color.red()
+        if not e_valido:
+            total_str = f"⚠️ {total_str} (Inválido <30m)"
 
     embed = discord.Embed(
-        title="⌚ Registro de Ponto",
+        title="🕒 Registro de Ponto",
         color=cor
     )
     
     if member.display_avatar:
         embed.set_thumbnail(url=member.display_avatar.url)
 
-    embed.add_field(name="👤 Membro", value=member.mention, inline=False)
-    embed.add_field(name="🟢 Início", value=f"`{inicio_hora}`", inline=True)
-    embed.add_field(name="🔴 Término", value=f"`{fim_hora}`", inline=True)
+    embed.add_field(
+        name="👤 Membro", 
+        value=f"{member.mention}", 
+        inline=False
+    )
     
-    if status == "FECHADO":
-        embed.add_field(name="⌛ Tempo Total", value=f"**{total_str}**", inline=False)
+    embed.add_field(
+        name="▶️ Início", 
+        value=f"```\n{inicio_hora}\n```", 
+        inline=True
+    )
+    
+    embed.add_field(
+        name="⏹️ Término", 
+        value=f"```\n{fim_hora}\n```", 
+        inline=True
+    )
+    
+    embed.add_field(
+        name=" Status", 
+        value=f"```\n{total_str}\n```", 
+        inline=False
+    )
 
-    if status == "FECHADO" and not e_valido:
-        embed.set_footer(text="⚠️ Ponto inválido (<30 min - Não contabilizado) • Dev: Gabriel Gomes")
-    else:
-        embed.set_footer(text="Desenvolvido por Gabriel Gomes")
+    embed.set_footer(text="</> Desenvolvido por Gabriel Gomes")
 
     return embed
 
@@ -238,7 +255,6 @@ async def processar_finalizar(member, guild, motivo="Finalizado pelo usuário"):
     inicio_hora = inicio_dt.strftime("%H:%M")
     fim_hora = agora_dt.strftime("%H:%M")
     
-    # Verifica se cumpriu o tempo mínimo de 30 minutos (1800 segundos)
     e_valido = 1 if duracao_segundos >= TEMPO_MINIMO_SEGUNDOS else 0
     
     cursor.execute("""
@@ -256,7 +272,6 @@ async def processar_finalizar(member, guild, motivo="Finalizado pelo usuário"):
             embed_log = criar_embed_log(member, inicio_hora, fim_hora, tempo_fmt, "FECHADO", e_valido=bool(e_valido))
             await msg.edit(embed=embed_log)
             
-            # Adiciona a reação de status diretamente no Discord
             emoji_reacao = "✅" if e_valido else "❌"
             await msg.add_reaction(emoji_reacao)
     except Exception:
@@ -352,7 +367,7 @@ async def setup_ponto(ctx):
                     "> Para verificar o total de horas registradas, basta acionar o botão \"HORAS\".",
         color=discord.Color.dark_theme()
     )
-    embed.set_footer(text="Sistema desenvolvido por Gabriel Gomes")
+    embed.set_footer(text="</> Desenvolvido por Gabriel Gomes")
     await ctx.send(embed=embed, view=PontoView())
 
 @bot.command(name="ranking")
