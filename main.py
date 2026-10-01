@@ -144,11 +144,11 @@ def formatar_tempo_ranking(duracao_segundos):
 
 def criar_embed_log(member: discord.Member, inicio_hora: str, fim_hora: str = "—", total_str: str = "Em andamento...", status: str = "ABERTO", e_valido: bool = True) -> discord.Embed:
     if status == "ABERTO":
-        cor = discord.Color.green()
+        cor = discord.Color.blue()
         fim_hora = "—"
         total_str = "🕒 Em andamento..."
     else:  # FECHADO
-        cor = discord.Color.green() if e_valido else discord.Color.red()
+        cor = discord.Color.blue() if e_valido else discord.Color.red()
         if not e_valido:
             total_str = f"⚠️ {total_str} (Inválido <30m)"
 
@@ -312,7 +312,7 @@ class PontoView(View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="ABRIR", style=discord.ButtonStyle.green, custom_id="btn_iniciar")
+    @discord.ui.button(label="ABRIR", style=discord.ButtonStyle.green, emoji="📝", custom_id="btn_iniciar")
     async def btn_iniciar(self, interaction: discord.Interaction, button: Button):
         await interaction.response.defer(ephemeral=True)
         sucesso, msg = await processar_iniciar(interaction)
@@ -323,7 +323,7 @@ class PontoView(View):
             
         await interaction.followup.send(msg, ephemeral=True)
 
-    @discord.ui.button(label="FECHAR", style=discord.ButtonStyle.red, custom_id="btn_finalizar")
+    @discord.ui.button(label="FECHAR", style=discord.ButtonStyle.red, emoji="🔒", custom_id="btn_finalizar")
     async def btn_finalizar(self, interaction: discord.Interaction, button: Button):
         await interaction.response.defer(ephemeral=True)
         sucesso, msg = await processar_finalizar(interaction.user, interaction.guild)
@@ -334,7 +334,7 @@ class PontoView(View):
             
         await interaction.followup.send(msg, ephemeral=True)
 
-    @discord.ui.button(label="HORAS", style=discord.ButtonStyle.gray, custom_id="btn_horas")
+    @discord.ui.button(label="HORAS", style=discord.ButtonStyle.gray, emoji="🕒", custom_id="btn_horas")
     async def btn_horas(self, interaction: discord.Interaction, button: Button):
         await interaction.response.defer(ephemeral=True)
         msg = consultar_horas(interaction.user.id)
@@ -359,15 +359,22 @@ async def set_log_channel(ctx, channel: discord.TextChannel):
 async def setup_ponto(ctx):
     embed = discord.Embed(
         title="🌐 | BATE PONTO PMESP",
-        description="O bate-ponto é utilizado para contabilizar as horas de atividade de um membro no servidor. "
-                    "Cada ponto deverá possuir um acúmulo mínimo de 30 minutos para ser registrado e contabilizado no banco de horas.\n\n"
-                    "ℹ️ **Funcionamento**\n\n"
-                    "> Para iniciar um registro de ponto o membro deverá entrar em qualquer canal de voz da categoria **#PATRULHAMENTO PMESP** e clicar no botão \"ABRIR\" localizado abaixo.\n\n"
-                    "> Para finalizar o registro, o membro deve permanecer no canal de voz e utilizar o botão \"FECHAR\" para que o ponto seja contabilizado. Caso o membro saia do canal de voz sem utilizar o comando o ponto é finalizado automaticamente após 3 minutos.\n\n"
-                    "> Para verificar o total de horas registradas, basta acionar o botão \"HORAS\".",
-        color=discord.Color.dark_theme()
+        description="O bate-ponto é utilizado para contabilizar as horas de atividade de um membro no servidor. Cada ponto deverá possuir um acúmulo mínimo de **30 minutos** para ser registrado e contabilizado no banco de horas.",
+        color=discord.Color.blue()
     )
-    embed.set_footer(text="</> Desenvolvido por Gabriel Gomes")
+    
+    # Campo Funcionamento exatamente como na imagem
+    embed.add_field(
+        name="ℹ️  Funcionamento",
+        value=(
+            "1️⃣  Para iniciar um registro de ponto o membro deverá entrar em qualquer canal de voz da categoria **#PATRULHAMENTO PMESP** e clicar no botão \"ABRIR\" localizado abaixo.\n\n"
+            "2️⃣  Para finalizar o registro, o membro deve permanecer no canal de voz e utilizar o botão \"FECHAR\" para que o ponto seja contabilizado. Caso o membro saia do canal de voz sem utilizar o comando o ponto é finalizado automaticamente após 3 minutos.\n\n"
+            "3️⃣  Para verificar o total de horas registradas, basta acionar o botão \"HORAS\"."
+        ),
+        inline=False
+    )
+    
+    embed.set_footer(text="</> Sistema desenvolvido por Gabriel Gomes")
     await ctx.send(embed=embed, view=PontoView())
 
 @bot.command(name="ranking")
