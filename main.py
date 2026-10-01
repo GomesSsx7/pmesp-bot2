@@ -184,7 +184,7 @@ def criar_embed_log(member: discord.Member, inicio_hora: str, fim_hora: str = "�
         inline=False
     )
 
-    embed.set_footer(text="</> Desenvolvido por Gabriel Gomes")
+    embed.set_footer(text="</> Sistema desenvolvido por Gabriel Gomes")
 
     return embed
 
@@ -357,21 +357,24 @@ async def set_log_channel(ctx, channel: discord.TextChannel):
 @bot.command(name="setup_ponto")
 @commands.has_permissions(administrator=True)
 async def setup_ponto(ctx):
+    # Texto formatado numa única estrutura contínua para espaçamento perfeito
+    descricao_texto = (
+        "O bate-ponto é utilizado para contabilizar as horas de atividade de um membro no "
+        "servidor. Cada ponto deverá possuir um acúmulo mínimo de **30 minutos** para ser "
+        "registrado e contabilizado no banco de horas.\n\n"
+        "ℹ️ **Funcionamento**\n\n"
+        "1️⃣  Para iniciar um registro de ponto o membro deverá entrar em qualquer canal "
+        "de voz da categoria **#PATRULHAMENTO PMESP** e clicar no botão \"ABRIR\" localizado abaixo.\n\n"
+        "2️⃣  Para finalizar o registro, o membro deve permanecer no canal de voz e utilizar "
+        "o botão \"FECHAR\" para que o ponto seja contabilizado. Caso o membro saia "
+        "do canal de voz sem utilizar o comando o ponto é finalizado automaticamente após 3 minutos.\n\n"
+        "3️⃣  Para verificar o total de horas registradas, basta acionar o botão \"HORAS\"."
+    )
+
     embed = discord.Embed(
         title="🌐 | BATE PONTO PMESP",
-        description="O bate-ponto é utilizado para contabilizar as horas de atividade de um membro no servidor. Cada ponto deverá possuir um acúmulo mínimo de **30 minutos** para ser registrado e contabilizado no banco de horas.",
+        description=descricao_texto,
         color=discord.Color.blue()
-    )
-    
-    # Campo Funcionamento exatamente como na imagem
-    embed.add_field(
-        name="ℹ️  Funcionamento",
-        value=(
-            "1️⃣  Para iniciar um registro de ponto o membro deverá entrar em qualquer canal de voz da categoria **#PATRULHAMENTO PMESP** e clicar no botão \"ABRIR\" localizado abaixo.\n\n"
-            "2️⃣  Para finalizar o registro, o membro deve permanecer no canal de voz e utilizar o botão \"FECHAR\" para que o ponto seja contabilizado. Caso o membro saia do canal de voz sem utilizar o comando o ponto é finalizado automaticamente após 3 minutos.\n\n"
-            "3️⃣  Para verificar o total de horas registradas, basta acionar o botão \"HORAS\"."
-        ),
-        inline=False
     )
     
     embed.set_footer(text="</> Sistema desenvolvido por Gabriel Gomes")
